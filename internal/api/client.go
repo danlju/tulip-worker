@@ -24,7 +24,7 @@ func NewClient(baseURL string) *Client {
 
 func (c *Client) MarkStarted(buildID string) error {
 	return c.retry(func() error {
-		return c.post(fmt.Sprintf("http://localhost:8080/builds/%s/running", buildID), nil)
+		return c.post(fmt.Sprintf("http://localhost:8080/internal/builds/%s/running", buildID), nil)
 	})
 }
 
@@ -34,7 +34,7 @@ func (c *Client) MarkCompleted(buildID string, duration int64) error {
 	}
 
 	return c.retry(func() error {
-		return c.post(fmt.Sprintf("http://localhost:8080/builds/%s/completed", buildID), payload)
+		return c.post(fmt.Sprintf("http://localhost:8080/internal/builds/%s/completed", buildID), payload)
 	})
 }
 
@@ -42,7 +42,7 @@ func (c *Client) MarkFailed(buildID string, duration int64) error {
 	payload := map[string]string{"error": "build faled"}
 
 	return c.retry(func() error {
-		return c.post(fmt.Sprintf("http://localhost:8080/builds/%s/failed", buildID), payload)
+		return c.post(fmt.Sprintf("http://localhost:8080/internal/builds/%s/failed", buildID), payload)
 	})
 }
 

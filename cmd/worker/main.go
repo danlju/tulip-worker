@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 
 	"github.com/danlju/tulip-worker/internal/api"
+	"github.com/danlju/tulip-worker/internal/executor"
 	"github.com/danlju/tulip-worker/internal/queue"
 	"github.com/danlju/tulip-worker/internal/worker"
 )
@@ -44,7 +45,10 @@ func main() {
 	queueClient := queue.NewClient(sqsClient, queueURL)
 
 	apiClient := api.NewClient(apiURL)
-	handler := worker.NewBuildHandler(apiClient)
+
+	exec := executor.NewExecutor("/tmp/builds")
+
+	handler := worker.NewBuildHandler(apiClient, exec)
 
 	pool := worker.NewPool(5, handler)
 
