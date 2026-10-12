@@ -22,21 +22,21 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	queueURL := "/tulip-queue" //os.Getenv("QUEUE_URL")
-	apiURL := os.Getenv("API_URL")
+	queueURL := envOrDefault("QUEUE_URL", "http://localhost:9324/tulip-queue")
+	apiURL := envOrDefault("API_URL", "http://localhost:8080")
+	sqsEndpoint := os.Getenv("SQS_ENDPOINT")
 
-	cfg, err := config.LoadDefaultConfig(ctx,
-		config.WithRegion("us-east-1"),
-		config.WithEndpointResolverWithOptions(
-			aws.EndpointResolverWithOptionsFunc(
-				func(service, region string, options ...interface{}) (aws.Endpoint, error) {
-					return aws.Endpoint{
-						URL: "http://localhost:9324",
-					}, nil
-				},
-			),
-		),
-	)
+	loadOptions := []func(*config.LoadOptions) error{
+		config.WithRegion(envOrDefault("AWS_REGION", "us-east-1")),
+	}
+	if sqsEndpoint != "" {
+		loadOptions = append(loadOptions, config.WithEndpointResolverWithOptions(
+			aws.EndpointResolverWithOptionsFunc(func(service, region string, options ...interface{}) (aws.Endpoint, error) {
+				return aws.Endpoint{URL: sqsEndpoint}, nil
+			}),
+		))
+	}
+	cfg, err := config.LoadDefaultConfig(ctx, loadOptions...)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func main() {
 
 	apiClient := api.NewClient(apiURL)
 
-	exec := executor.NewExecutor("/tmp/builds")
+	exec := executor.NewExecutor(envOrDefault("BUILD_WORKSPACE", "/tmp/builds"))
 
 	handler := worker.NewBuildHandler(apiClient, exec)
 
@@ -67,7 +67,7 @@ func main() {
 				continue
 			}
 
-			msgs, err := queueClient.Receive(ctx, 5)
+			msgs, err := queueClient.Receive(ctx, pool.Available())
 			if err != nil {
 				log.Println("receive error:", err)
 				time.Sleep(2 * time.Second)
@@ -76,10 +76,21 @@ func main() {
 
 			for _, msg := range msgs {
 				m := msg
-				pool.Submit(worker.Job{Msg: m})
-
-				go queueClient.Delete(context.Background(), m.ReceiptHandle)
+				pool.Submit(worker.Job{
+					Msg: m,
+					Ack: func(ackCtx context.Context) error { return queueClient.Delete(ackCtx, m.ReceiptHandle) },
+					Heartbeat: func(heartbeatCtx context.Context) error {
+						return queueClient.ExtendVisibility(heartbeatCtx, m.ReceiptHandle, 120)
+					},
+				})
 			}
 		}
 	}
+}
+
+func envOrDefault(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
 }

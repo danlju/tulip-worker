@@ -28,6 +28,7 @@ func (c *Client) Receive(ctx context.Context, max int) ([]Message, error) {
 		QueueUrl:            &c.queueURL,
 		MaxNumberOfMessages: int32(max),
 		WaitTimeSeconds:     10,
+		VisibilityTimeout:   120,
 	})
 	if err != nil {
 		return nil, err
@@ -37,8 +38,14 @@ func (c *Client) Receive(ctx context.Context, max int) ([]Message, error) {
 
 	for _, m := range out.Messages {
 		var payload model.BuildRequest
+		if m.Body == nil {
+			log.Println("invalid message: empty body")
+			continue
+		}
 		if err := json.Unmarshal([]byte(*m.Body), &payload); err != nil {
 			log.Println("invalid message:", err)
+			// Leave it on the queue; SQS moves it to the configured DLQ after
+			// the redrive receive limit is reached.
 			continue
 		}
 
@@ -51,13 +58,20 @@ func (c *Client) Receive(ctx context.Context, max int) ([]Message, error) {
 	return messages, nil
 }
 
-func (c *Client) Delete(ctx context.Context, receiptHandle *string) {
+func (c *Client) Delete(ctx context.Context, receiptHandle *string) error {
 	_, err := c.sqs.DeleteMessage(ctx, &sqs.DeleteMessageInput{
 		QueueUrl:      &c.queueURL,
 		ReceiptHandle: receiptHandle,
 	})
 
-	if err != nil {
-		log.Println("failed to delete message:", err)
-	}
+	return err
+}
+
+func (c *Client) ExtendVisibility(ctx context.Context, receiptHandle *string, seconds int32) error {
+	_, err := c.sqs.ChangeMessageVisibility(ctx, &sqs.ChangeMessageVisibilityInput{
+		QueueUrl:          &c.queueURL,
+		ReceiptHandle:     receiptHandle,
+		VisibilityTimeout: seconds,
+	})
+	return err
 }

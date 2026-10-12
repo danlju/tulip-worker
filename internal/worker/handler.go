@@ -28,27 +28,30 @@ func (h *BuildHandler) Handle(ctx context.Context, msg queue.Message) (err error
 
 	log.Printf("processing build %s", buildID)
 
-	if err = h.api.MarkStarted(buildID); err != nil {
+	shouldRun, startErr := h.api.MarkStarted(buildID)
+	if startErr != nil {
+		err = startErr
 		return err
+	}
+	if !shouldRun {
+		log.Printf("build %s is already terminal; acknowledging duplicate delivery", buildID)
+		return nil
 	}
 
 	start := time.Now()
 
-	defer func() {
-		duration := time.Since(start).Milliseconds()
-
-		if err != nil {
-			if e := h.api.MarkFailed(buildID, duration); e != nil {
-				log.Printf("failed to mark build %s as FAILED: %v", buildID, e)
-			}
-			return
-		}
-
-		if e := h.api.MarkCompleted(buildID, duration); e != nil {
-			log.Printf("failed to mark build %s as COMPLETED: %v", buildID, e)
-		}
-	}()
-
 	err = h.executor.Execute(ctx, build)
-	return err
+	duration := time.Since(start).Milliseconds()
+	if err != nil {
+		buildErr := err
+		if statusErr := h.api.MarkFailed(buildID, duration, buildErr.Error()); statusErr != nil {
+			return statusErr
+		}
+		log.Printf("build %s failed: %v", buildID, buildErr)
+		return nil
+	}
+	if err = h.api.MarkCompleted(buildID, duration); err != nil {
+		return err
+	}
+	return nil
 }

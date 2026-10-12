@@ -4,12 +4,15 @@ import (
 	"context"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/danlju/tulip-worker/internal/queue"
 )
 
 type Job struct {
-	Msg queue.Message
+	Msg       queue.Message
+	Ack       func(context.Context) error
+	Heartbeat func(context.Context) error
 }
 
 type Handler interface {
@@ -17,19 +20,18 @@ type Handler interface {
 }
 
 type Pool struct {
-	jobs   chan Job
-	wg     sync.WaitGroup
-	ctx    context.Context
-	cancel context.CancelFunc
+	jobs      chan Job
+	available chan struct{}
+	wg        sync.WaitGroup
 }
 
 func NewPool(size int, handler Handler) *Pool {
-	ctx, cancel := context.WithCancel(context.Background())
-
 	p := &Pool{
-		jobs:   make(chan Job, size*2),
-		ctx:    ctx,
-		cancel: cancel,
+		jobs:      make(chan Job, size),
+		available: make(chan struct{}, size),
+	}
+	for i := 0; i < size; i++ {
+		p.available <- struct{}{}
 	}
 
 	for i := 0; i < size; i++ {
@@ -43,33 +45,48 @@ func NewPool(size int, handler Handler) *Pool {
 func (p *Pool) worker(id int, handler Handler) {
 	defer p.wg.Done()
 
-	for {
-		select {
-		case <-p.ctx.Done():
-			log.Printf("worker %d shutting down", id)
-			return
-
-		case job, ok := <-p.jobs:
-			if !ok {
-				return
-			}
-			if err := handler.Handle(p.ctx, job.Msg); err != nil {
-				log.Printf("worker %d error: %v", id, err)
+	for job := range p.jobs {
+		ctx := context.Background()
+		heartbeatDone := make(chan struct{})
+		if job.Heartbeat != nil {
+			go func() {
+				ticker := time.NewTicker(30 * time.Second)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-heartbeatDone:
+						return
+					case <-ticker.C:
+						if err := job.Heartbeat(ctx); err != nil {
+							log.Printf("worker %d visibility extension failed: %v", id, err)
+						}
+					}
+				}
+			}()
+		}
+		err := handler.Handle(ctx, job.Msg)
+		close(heartbeatDone)
+		if err != nil {
+			log.Printf("worker %d error; leaving message for retry: %v", id, err)
+		} else if job.Ack != nil {
+			if err := job.Ack(ctx); err != nil {
+				log.Printf("worker %d failed to acknowledge message: %v", id, err)
 			}
 		}
+		p.available <- struct{}{}
 	}
 }
 
 func (p *Pool) Submit(job Job) {
+	<-p.available
 	p.jobs <- job
 }
 
 func (p *Pool) Available() int {
-	return cap(p.jobs) - len(p.jobs)
+	return len(p.available)
 }
 
 func (p *Pool) Shutdown() {
-	p.cancel()
 	close(p.jobs)
 	p.wg.Wait()
 }
